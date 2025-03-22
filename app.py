@@ -14,6 +14,7 @@ import shutil
 import logging
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+import gc
 
 # Load environment variables
 load_dotenv()
@@ -33,7 +34,7 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB max file size
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -59,7 +60,7 @@ def process_image(image_path):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # Resize image if too large
-        max_dimension = 1024
+        max_dimension = 800  # Reduced from 1024
         height, width = img_rgb.shape[:2]
         if max(height, width) > max_dimension:
             scale = max_dimension / max(height, width)
@@ -103,6 +104,11 @@ def process_image(image_path):
         depth = predicted_depth.cpu().numpy()
         depth = (depth - depth.min()) / (depth.max() - depth.min())
         
+        # Clear memory
+        del inputs, outputs, predicted_depth
+        torch.cuda.empty_cache()
+        gc.collect()
+        
         return cropped_img, depth
     except Exception as e:
         logger.error(f"Error processing image {image_path}: {str(e)}")
@@ -145,6 +151,10 @@ def reconstruct_3d(images, depths):
         mesh.remove_duplicated_triangles()
         mesh.remove_duplicated_vertices()
         mesh.remove_non_manifold_edges()
+        
+        # Clear memory
+        del points, colors, pcd
+        gc.collect()
         
         return mesh
     except Exception as e:
@@ -192,6 +202,9 @@ def process_images():
                 processed_img, processed_depth = result
                 processed_images.append(processed_img)
                 processed_depths.append(processed_depth)
+                
+                # Clear memory after each image
+                gc.collect()
             
             if not processed_images:
                 logger.error("No valid images processed")
