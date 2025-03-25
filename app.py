@@ -15,6 +15,8 @@ import logging
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import gc
+import psutil
+import sys
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +24,18 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Set memory limit (adjust based on your Render instance)
+MAX_MEMORY_PERCENT = 80
+
+def check_memory():
+    memory = psutil.virtual_memory()
+    if memory.percent > MAX_MEMORY_PERCENT:
+        logger.warning(f"High memory usage detected: {memory.percent}%")
+        gc.collect()
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -39,15 +53,19 @@ app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB max file size
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Initialize models
+# Initialize models with error handling
 try:
+    logger.info("Initializing models...")
+    check_memory()
     yolo_model = YOLO('yolov8n.pt')
+    check_memory()
     dpt_processor = DPTImageProcessor.from_pretrained("Intel/dpt-large")
+    check_memory()
     dpt_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-large")
     logger.info("Models initialized successfully")
 except Exception as e:
     logger.error(f"Error initializing models: {str(e)}")
-    raise
+    sys.exit(1)
 
 def process_image(image_path):
     try:
@@ -164,6 +182,7 @@ def reconstruct_3d(images, depths):
 @app.route('/process', methods=['POST'])
 def process_images():
     try:
+        check_memory()
         if 'images' not in request.files:
             logger.error("No images provided in request")
             return jsonify({'error': 'No images provided'}), 400
@@ -182,6 +201,7 @@ def process_images():
             
             # Process each image
             for file in files:
+                check_memory()
                 if file.filename == '':
                     continue
                     
@@ -204,7 +224,7 @@ def process_images():
                 processed_depths.append(processed_depth)
                 
                 # Clear memory after each image
-                gc.collect()
+                check_memory()
             
             if not processed_images:
                 logger.error("No valid images processed")
@@ -213,6 +233,7 @@ def process_images():
             logger.info(f"Successfully processed {len(processed_images)} images")
             
             # Reconstruct 3D model
+            check_memory()
             mesh = reconstruct_3d(processed_images, processed_depths)
             
             # Save as GLB
@@ -225,6 +246,8 @@ def process_images():
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        check_memory()
 
 @app.route('/health', methods=['GET'])
 def health_check():
