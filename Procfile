@@ -1,1 +1,1 @@
-web: gunicorn wsgi:app --workers 1 --threads 1 --timeout 180 --max-requests 20 --max-requests-jitter 5 --worker-class=gthread --worker-tmp-dir /dev/shm --log-level info --preload 
+web: gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 180 --max-requests 20 --max-requests-jitter 5 --worker-class=gthread --worker-tmp-dir /dev/shm --log-level info --preload 

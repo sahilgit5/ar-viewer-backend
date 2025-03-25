@@ -82,9 +82,8 @@ def initialize_models():
         logger.error(f"Error initializing models: {str(e)}")
         raise
 
-@app.before_first_request
-def before_first_request():
-    initialize_models()
+# Initialize models when the application starts
+initialize_models()
 
 def process_image(image_path):
     try:
