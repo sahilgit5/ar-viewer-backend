@@ -33,7 +33,6 @@ def check_memory():
     if memory.percent > MAX_MEMORY_PERCENT:
         logger.warning(f"High memory usage detected: {memory.percent}%")
         gc.collect()
-        torch.cuda.empty_cache()
         if hasattr(torch.cuda, 'empty_cache'):
             torch.cuda.empty_cache()
 
@@ -48,24 +47,44 @@ if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024  # 4MB max file size
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Initialize models with error handling
-try:
-    logger.info("Initializing models...")
-    check_memory()
-    yolo_model = YOLO('yolov8n.pt')
-    check_memory()
-    dpt_processor = DPTImageProcessor.from_pretrained("Intel/dpt-large")
-    check_memory()
-    dpt_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-large")
-    logger.info("Models initialized successfully")
-except Exception as e:
-    logger.error(f"Error initializing models: {str(e)}")
-    sys.exit(1)
+# Initialize models with error handling and lazy loading
+yolo_model = None
+dpt_processor = None
+dpt_model = None
+
+def initialize_models():
+    global yolo_model, dpt_processor, dpt_model
+    try:
+        logger.info("Initializing models...")
+        check_memory()
+        
+        if yolo_model is None:
+            # Use a smaller YOLO model
+            yolo_model = YOLO('yolov8n.pt')
+            check_memory()
+        
+        if dpt_processor is None:
+            # Use a smaller DPT model
+            dpt_processor = DPTImageProcessor.from_pretrained("Intel/dpt-small")
+            check_memory()
+        
+        if dpt_model is None:
+            dpt_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-small")
+            check_memory()
+            
+        logger.info("Models initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing models: {str(e)}")
+        raise
+
+@app.before_first_request
+def before_first_request():
+    initialize_models()
 
 def process_image(image_path):
     try:
@@ -78,7 +97,7 @@ def process_image(image_path):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         # Resize image if too large
-        max_dimension = 800  # Reduced from 1024
+        max_dimension = 400  # Reduced from 800
         height, width = img_rgb.shape[:2]
         if max(height, width) > max_dimension:
             scale = max_dimension / max(height, width)
@@ -96,7 +115,7 @@ def process_image(image_path):
         x1, y1, x2, y2 = map(int, largest_box.xyxy[0])
         
         # Add padding to the crop
-        padding = 20
+        padding = 10  # Reduced from 20
         x1 = max(0, x1 - padding)
         y1 = max(0, y1 - padding)
         x2 = min(img_rgb.shape[1], x2 + padding)
@@ -124,7 +143,8 @@ def process_image(image_path):
         
         # Clear memory
         del inputs, outputs, predicted_depth
-        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
         gc.collect()
         
         return cropped_img, depth
@@ -157,14 +177,14 @@ def reconstruct_3d(images, depths):
         pcd.points = o3d.utility.Vector3dVector(points)
         pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
         
-        # Remove outliers
-        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        # Remove outliers with more aggressive parameters
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=10, std_ratio=1.5)
         
         # Estimate normals
         pcd.estimate_normals()
         
-        # Poisson surface reconstruction
-        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd)
+        # Poisson surface reconstruction with reduced parameters
+        mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=6)
         mesh.remove_degenerate_triangles()
         mesh.remove_duplicated_triangles()
         mesh.remove_duplicated_vertices()
@@ -191,6 +211,10 @@ def process_images():
         if not files:
             logger.error("Empty files list")
             return jsonify({'error': 'No images selected'}), 400
+        
+        # Limit number of images
+        if len(files) > 3:
+            return jsonify({'error': 'Maximum 3 images allowed'}), 400
         
         logger.info(f"Processing {len(files)} images")
         
