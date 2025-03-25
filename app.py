@@ -69,18 +69,22 @@ def initialize_models():
             check_memory()
         
         if dpt_processor is None:
-            # Use a smaller DPT model
-            dpt_processor = DPTImageProcessor.from_pretrained("Intel/dpt-small")
+            # Use the correct model name
+            dpt_processor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
             check_memory()
         
         if dpt_model is None:
-            dpt_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-small")
+            dpt_model = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas")
             check_memory()
             
         logger.info("Models initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing models: {str(e)}")
-        raise
+        # Don't raise the error, just log it
+        logger.error("Application will continue without depth estimation model")
+        # Set models to None to prevent usage
+        dpt_processor = None
+        dpt_model = None
 
 # Initialize models when the application starts
 initialize_models()
@@ -123,28 +127,35 @@ def process_image(image_path):
         # Crop the image
         cropped_img = img_rgb[y1:y2, x1:x2]
         
-        # Depth estimation
-        inputs = dpt_processor(images=Image.fromarray(cropped_img), return_tensors="pt")
-        with torch.no_grad():
-            outputs = dpt_model(**inputs)
-            predicted_depth = outputs.predicted_depth
-        
-        # Normalize depth
-        predicted_depth = F.interpolate(
-            predicted_depth.unsqueeze(1),
-            size=cropped_img.shape[:2],
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-        
-        depth = predicted_depth.cpu().numpy()
-        depth = (depth - depth.min()) / (depth.max() - depth.min())
-        
-        # Clear memory
-        del inputs, outputs, predicted_depth
-        if hasattr(torch.cuda, 'empty_cache'):
-            torch.cuda.empty_cache()
-        gc.collect()
+        # Check if depth estimation models are available
+        if dpt_processor is None or dpt_model is None:
+            logger.warning("Depth estimation models not available, using simple depth estimation")
+            # Create a simple depth map (placeholder)
+            depth = np.zeros(cropped_img.shape[:2], dtype=np.float32)
+            depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)
+        else:
+            # Depth estimation
+            inputs = dpt_processor(images=Image.fromarray(cropped_img), return_tensors="pt")
+            with torch.no_grad():
+                outputs = dpt_model(**inputs)
+                predicted_depth = outputs.predicted_depth
+            
+            # Normalize depth
+            predicted_depth = F.interpolate(
+                predicted_depth.unsqueeze(1),
+                size=cropped_img.shape[:2],
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+            
+            depth = predicted_depth.cpu().numpy()
+            depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)
+            
+            # Clear memory
+            del inputs, outputs, predicted_depth
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+            gc.collect()
         
         return cropped_img, depth
     except Exception as e:
